@@ -88,3 +88,9 @@ func (m *Memtable) Ascend(fn func(key, value string) bool) {
 func IsTombstone(value string) bool {
 	return value == Tombstone
 }
+
+func (m *Memtable) SetMaxSize(size int64) {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    m.maxSize = size
+}
