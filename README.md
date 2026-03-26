@@ -1,6 +1,9 @@
 # BedrockDB
 
-A persistent key-value storage engine written in Go, built on an LSM-tree architecture. BedrockDB implements the core storage stack from scratch: write-ahead log, memtable, and SSTable — with no external storage dependencies.
+BedrockDB is an embedded key-value storage engine built from scratch — 
+write-ahead log with group commit, a sorted memtable, and immutable 
+SSTables with bloom-filtered point lookups backed by a pread-based 
+LRU block cache. No external storage dependencies.
 
 ---
 
@@ -13,7 +16,8 @@ Read path:   Memtable → Bloom filter → Index → LRU block cache → Block d
 
 **Write-ahead log (WAL)** — Group commit batches concurrent writes into a single fsync. Every write is durable before ack.
 
-**Memtable** — Concurrent skip-list protected by a read-write mutex. Reads take a read lock only; concurrent reads never block each other.
+**Memtable** — Concurrent sorted structure (B-tree) protected by a read-write mutex.
+ Reads take a read lock only; concurrent reads never block each other.
 
 **SSTable** — Immutable on-disk files with a three-layer read path: bloom filter (skip absent keys), binary-searched sparse index (find the right block), LRU block cache (avoid redundant decodes).
 
@@ -86,7 +90,9 @@ Aligns with `PAGE_SIZE` on Linux. A cache miss triggers one page fault; the OS f
 One index entry per block, not per key. At 4KB blocks with ~50-byte average keys, a 1GB SSTable needs ~5,000 index entries (~250KB in memory) rather than millions. The index fits in L2 cache during binary search.
 
 **Why group commit in the WAL?**
-`fsync` latency on NVMe is 50–200µs regardless of how many bytes were written. Batching N writes into one fsync amortises that latency across N operations. BedrockDB's WAL writer parks concurrent writers behind a mutex, flushes the batch, fsyncs once, then wakes all waiters.
+`fsync` latency on NVMe is 50–200µs regardless of how many bytes were written. Batching N writes into one fsync amortises that latency across N operations. BedrockDB's WAL buffers writes in a bufio.Writer and a background 
+goroutine fsyncs every 100µs — or immediately when the buffer 
+exceeds 64KB. Writers never block waiting for fsync.
 
 **Why `pread` + LRU over `mmap`?**
 `mmap` delegates caching to the OS page cache, which sounds appealing but gives up control. The OS evicts pages under memory pressure without regard for access frequency — it doesn't know a block cache hit is worth more than a cold page. It also surfaces I/O errors as `SIGBUS` rather than return values, which are difficult to handle correctly in Go. `pread` keeps the read path explicit: BedrockDB decides which blocks stay resident, eviction policy is LRU over decoded `[]Entry` structs (not raw bytes), and errors propagate as normal Go errors. The tradeoff is that `pread` pays a syscall per cache miss whereas `mmap` faults in pages transparently — acceptable here because the LRU is designed to make cache misses rare on hot data.
@@ -95,3 +101,4 @@ One index entry per block, not per key. At 4KB blocks with ~50-byte average keys
 LRU evicts cold blocks under memory pressure while keeping hot blocks resident. Under a Zipfian access distribution (typical for key-value workloads), a small cache captures a disproportionate fraction of reads. BedrockDB defaults to 256 entries (1MB of decoded blocks).
 
 ---
+
