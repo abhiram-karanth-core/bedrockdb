@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bedrockdb/internal/compaction"
 	"bedrockdb/internal/memtable"
 	"bedrockdb/internal/sstable"
 	"bedrockdb/internal/wal"
@@ -117,7 +118,38 @@ func (db *DB) Get(key string) (string, bool, error) {
 
 	return "", false, nil
 }
+func (db *DB) compact() {
+	db.mu.Lock()
+	// collect paths of all current SSTables
+	paths := make([]string, len(db.sstables))
+	for i, sst := range db.sstables {
+		paths[i] = sst.Path // need to store path in Reader
+	}
+	nextSST := db.nextSST
+	db.mu.Unlock()
 
+	outputPath, err := compaction.CompactDir(db.dir, paths, nextSST)
+	if err != nil {
+		fmt.Printf("db: compact: %v\n", err)
+		return
+	}
+
+	// open compacted SSTable
+	r, err := sstable.Open(outputPath)
+	if err != nil {
+		fmt.Printf("db: compact: open: %v\n", err)
+		return
+	}
+
+	// replace all old SSTables with the single compacted one
+	db.mu.Lock()
+	for _, sst := range db.sstables {
+		sst.Close()
+	}
+	db.sstables = []*sstable.Reader{r}
+	db.nextSST++
+	db.mu.Unlock()
+}
 func (db *DB) startFlush() {
 	db.immutable = db.memtable
 	db.memtable = memtable.New(defaultMemtableSize)
@@ -167,6 +199,10 @@ func (db *DB) flush() {
 	db.nextSST++
 	db.immutable = nil
 	db.flushing = false
+
+	if len(db.sstables) >= compaction.L0CompactionThreshold {
+		go db.compact()
+	}
 	db.mu.Unlock()
 
 	db.rotateWAL()
