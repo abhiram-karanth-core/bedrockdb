@@ -18,8 +18,8 @@ type Reader struct {
 	index []indexEntry
 	bloom *bloom.BloomFilter
 	cache *lruCache
+	Path  string
 }
-
 
 func Open(path string) (*Reader, error) {
 	f, err := os.Open(path)
@@ -30,6 +30,7 @@ func Open(path string) (*Reader, error) {
 	r := &Reader{
 		file:  f,
 		fd:    f.Fd(),
+		Path:  path, 
 		cache: newLRUCache(defaultCacheCapacity),
 	}
 
@@ -40,7 +41,6 @@ func Open(path string) (*Reader, error) {
 
 	return r, nil
 }
-
 
 func (r *Reader) loadFooter() error {
 	info, err := r.file.Stat()
@@ -114,7 +114,6 @@ func (r *Reader) loadIndex(indexOffset, bloomOffset uint64) error {
 	return nil
 }
 
-
 func (r *Reader) loadBloom(bloomOffset uint64) error {
 	var lenBuf [4]byte
 	if _, err := r.file.ReadAt(lenBuf[:], int64(bloomOffset)); err != nil {
@@ -163,7 +162,6 @@ func (r *Reader) Get(key string) (string, bool, error) {
 	return value, true, nil
 }
 
-
 func (r *Reader) findBlock(key string) (uint64, bool) {
 	if len(r.index) == 0 {
 		return 0, false
@@ -201,4 +199,18 @@ func (r *Reader) readBlock(offset uint64) ([]Entry, error) {
 
 func (r *Reader) Close() error {
 	return r.file.Close()
+}
+
+func (r *Reader) ScanAll() ([]Entry, error) {
+	var all []Entry
+
+	for _, idx := range r.index {
+		entries, err := r.readBlock(idx.blockOffset)
+		if err != nil {
+			return nil, fmt.Errorf("sstable: scan block at %d: %w", idx.blockOffset, err)
+		}
+		all = append(all, entries...)
+	}
+
+	return all, nil
 }
