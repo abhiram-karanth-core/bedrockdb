@@ -40,6 +40,9 @@ Each data block encodes entries as:
 
 The 4KB block size aligns with Linux page size and NVMe sector size — a single `pread` maps to one page fault and one sector read.
 
+> Not sure how a storage engine differs from a database like PostgreSQL?
+> [What BedrockDB is — and what it isn't →](https://bedrockdb-docs.vercel.app/)
+
 ---
 
 ## HTTP API
