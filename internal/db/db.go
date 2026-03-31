@@ -173,11 +173,8 @@ func (db *DB) compact() {
 			return
 		}
 	}
-	// replace old SSTs
-	// for _, sst := range db.sstables {
-	// 	sst.Close()
-	// }
-	remaining := db.sstables[k:]
+	remaining := make([]*sstable.Reader, len(db.sstables)-k)
+	copy(remaining, db.sstables[k:])
 	for _, sst := range selected {
 		sst.Close()
 	}
@@ -194,6 +191,13 @@ func (db *DB) startFlush() {
 }
 
 func (db *DB) flush() {
+	fmt.Println("flush: started")
+	defer fmt.Println("flush: done")
+	defer func() {
+		db.mu.Lock()
+		db.flushing = false
+		db.mu.Unlock()
+	}()
 	db.mu.RLock()
 	sstPath := filepath.Join(db.dir, fmt.Sprintf("sst-%06d.sst", db.nextSST))
 	imm := db.immutable
@@ -234,7 +238,7 @@ func (db *DB) flush() {
 	db.sstables = append([]*sstable.Reader{r}, db.sstables...)
 	db.nextSST++
 	db.immutable = nil
-	db.flushing = false
+	// db.flushing = false
 
 	if len(db.sstables) >= compaction.L0CompactionThreshold && !db.compacting {
 		go db.compact()
@@ -250,7 +254,7 @@ func (db *DB) rotateWAL() {
 
 	walPath := filepath.Join(db.dir, walFileName)
 	db.wal.Close()
-
+	os.Truncate(walPath, 0)
 	w, err := wal.Open(walPath)
 	if err != nil {
 		fmt.Printf("db: rotate wal: %v\n", err)
