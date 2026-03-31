@@ -19,9 +19,9 @@ Range path:  N-way heap merge across Memtable + SSTables → deduplicate → fil
 
 **Memtable** — Concurrent sorted structure (B-tree) protected by a read-write mutex. Reads take a read lock only — concurrent reads never block each other.
 
-**SSTable** — Immutable on-disk files with a three-layer read path: bloom filter (skip absent keys), binary-searched sparse index (find the right block), LRU block cache (avoid redundant decodes).
+**SSTable** — Immutable on-disk files with a three-layer read path: bloom filter (skip absent keys), binary-searched sparse index (find the right block), LRU block cache (avoid redundant decodes). SSTables are maintained in newest-first order, ensuring recent updates shadow older versions during lookups and compaction.
 
-**Compaction** — Size-tiered compaction using a k-way heap merge over the newest SSTables once a threshold is reached. Only the most recent k SSTables are compacted into a single SSTable, with duplicate keys resolved by recency and obsolete versions removed, while older SSTables remain untouched. This design intentionally trades increased read amplification for reduced write amplification compared to full compaction.
+**Compaction** — Size-tiered compaction using a k-way heap merge over the newest SSTables when the SSTable count exceeds a threshold. Only the most recent k SSTables are compacted into a single SSTable, with duplicate keys resolved by recency and obsolete versions removed, while older SSTables remain untouched. This design intentionally trades increased read amplification for reduced write amplification.
 
 ### SSTable file layout
 
