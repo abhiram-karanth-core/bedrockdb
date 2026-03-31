@@ -21,7 +21,7 @@ Range path:  N-way heap merge across Memtable + SSTables → deduplicate → fil
 
 **SSTable** — Immutable on-disk files with a three-layer read path: bloom filter (skip absent keys), binary-searched sparse index (find the right block), LRU block cache (avoid redundant decodes).
 
-**Compaction** — N-way heap merge across SSTables. Deduplicates stale versions, drops tombstones at the deepest level to reclaim disk space.
+**Compaction** — Size-tiered compaction using a k-way heap merge over the newest SSTables once a threshold is reached. Only the most recent k SSTables are compacted into a single SSTable, with duplicate keys resolved by recency and obsolete versions removed, while older SSTables remain untouched. This design intentionally trades increased read amplification for reduced write amplification compared to full compaction.
 
 ### SSTable file layout
 
