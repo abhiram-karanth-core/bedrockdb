@@ -19,16 +19,17 @@ const (
 )
 
 type DB struct {
-	mu        sync.RWMutex
-	dir       string
-	wal       *wal.WAL
-	memtable  *memtable.Memtable
-	immutable *memtable.Memtable
-	sstables  []*sstable.Reader
-	flushing  bool
-	nextSST   int
-	closeOnce sync.Once
-	closeCh   chan struct{}
+	mu         sync.RWMutex
+	dir        string
+	wal        *wal.WAL
+	memtable   *memtable.Memtable
+	immutable  *memtable.Memtable
+	sstables   []*sstable.Reader
+	flushing   bool
+	compacting bool
+	nextSST    int
+	closeOnce  sync.Once
+	closeCh    chan struct{}
 }
 
 func Open(dir string) (*DB, error) {
@@ -119,35 +120,70 @@ func (db *DB) Get(key string) (string, bool, error) {
 	return "", false, nil
 }
 func (db *DB) compact() {
+	//acquire ownership + snapshot
 	db.mu.Lock()
-	// collect paths of all current SSTables
-	paths := make([]string, len(db.sstables))
-	for i, sst := range db.sstables {
-		paths[i] = sst.Path // need to store path in Reader
+	if db.compacting {
+		db.mu.Unlock()
+		return
+	}
+	db.compacting = true
+
+	k := compaction.L0CompactionThreshold
+	if len(db.sstables) < k {
+		db.compacting = false
+		db.mu.Unlock()
+		return
+	}
+	selected := db.sstables[:k]
+	paths := make([]string, k)
+	for i, sst := range selected {
+		paths[i] = sst.Path
 	}
 	nextSST := db.nextSST
 	db.mu.Unlock()
 
+	// release ownership
+	defer func() {
+		db.mu.Lock()
+		db.compacting = false
+		db.mu.Unlock()
+	}()
+
+	// run compaction
 	outputPath, err := compaction.CompactDir(db.dir, paths, nextSST)
 	if err != nil {
 		fmt.Printf("db: compact: %v\n", err)
 		return
 	}
 
-	// open compacted SSTable
 	r, err := sstable.Open(outputPath)
 	if err != nil {
 		fmt.Printf("db: compact: open: %v\n", err)
 		return
 	}
 
-	// replace all old SSTables with the single compacted one
+	//install result safely
 	db.mu.Lock()
-	for _, sst := range db.sstables {
+
+	// state validation: abort if SST set changed during compaction
+	for i := 0; i < k; i++ {
+		if db.sstables[i].Path != paths[i] {
+			db.mu.Unlock()
+			r.Close()
+			return
+		}
+	}
+	// replace old SSTs
+	// for _, sst := range db.sstables {
+	// 	sst.Close()
+	// }
+	remaining := db.sstables[k:]
+	for _, sst := range selected {
 		sst.Close()
 	}
-	db.sstables = []*sstable.Reader{r}
+	db.sstables = append([]*sstable.Reader{r}, remaining...)
 	db.nextSST++
+
 	db.mu.Unlock()
 }
 func (db *DB) startFlush() {
@@ -200,7 +236,7 @@ func (db *DB) flush() {
 	db.immutable = nil
 	db.flushing = false
 
-	if len(db.sstables) >= compaction.L0CompactionThreshold {
+	if len(db.sstables) >= compaction.L0CompactionThreshold && !db.compacting {
 		go db.compact()
 	}
 	db.mu.Unlock()
