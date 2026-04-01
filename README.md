@@ -21,7 +21,7 @@ Range path:  N-way heap merge across Memtable + SSTables → deduplicate → fil
 
 **SSTable** — Immutable on-disk files with a three-layer read path: bloom filter (skip absent keys), binary-searched sparse index (find the right block), LRU block cache (avoid redundant decodes). SSTables are maintained in newest-first order, ensuring recent updates shadow older versions during lookups and compaction.
 
-**Compaction** — Size-tiered compaction using a k-way heap merge over the newest SSTables when the SSTable count exceeds a threshold. Only the most recent k SSTables are compacted into a single SSTable, with duplicate keys resolved by recency and obsolete versions removed, while older SSTables remain untouched. This design intentionally trades increased read amplification for reduced write amplification.
+**Compaction** — Size-tiered compaction groups SSTables into size buckets where max_size / min_size < 2.0 and compacts any bucket that reaches the threshold. Two tiers emerge naturally — small (fresh memtable flushes) and large (previous compaction outputs) — each compacting independently when their bucket fills. Duplicate keys are resolved by recency and tombstones are dropped at compaction time. Read amplification is bounded at 2 * (threshold - 1) + 2 sources per lookup.
 
 ### SSTable file layout
 
@@ -231,3 +231,6 @@ LRU evicts cold blocks under memory pressure while keeping hot blocks resident. 
 
 **Why N-way heap merge for compaction and range queries?**
 Both compaction and range queries require merging N sorted streams into one globally sorted output. A min-heap gives O(log N) per element across N iterators. The heap entry carries a source index — on key collision, the lower source index (newer SSTable) wins. Tombstones are dropped at the deepest compaction level where no older versions can exist below.
+
+**Why size-tiered compaction?**
+Size-tiered groups files of similar size rather than compacting by key range overlap (leveled) or recency (FIFO). This minimises write amplification — files are only rewritten when merged with peers of similar size, not on every level push. The tradeoff is higher read amplification than leveled compaction, mitigated by bloom filters and the LRU block cache. Cassandra uses the same strategy as its default for write-heavy workloads.
