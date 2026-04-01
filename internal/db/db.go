@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -318,4 +319,28 @@ func (db *DB) Close() error {
 	}
 
 	return nil
+}
+
+func (db *DB) Stats() string {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	return fmt.Sprintf(
+		"memtable_size=%d\nimmutable=%v\nsst_count=%d\n",
+		db.memtable.Size(),
+		db.immutable != nil,
+		len(db.sstables),
+	)
+}
+func (db *DB) SSTables() string {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var out strings.Builder
+
+	for i, sst := range db.sstables {
+		out.WriteString(fmt.Sprintf("[%d] %s\n", i, sst.Path))
+	}
+
+	return out.String()
 }
