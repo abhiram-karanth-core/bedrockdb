@@ -86,21 +86,61 @@ curl http://localhost:8080/key/city
 ```
 
 ---
+## CLI (Interactive Shell)
+
+BedrockDB provides an interactive CLI for local debugging and inspection of the storage engine.
+```bash
+go run cmd/cli/main.go
+```
+
+**Supported commands**
+```
+# basic operations
+put <key> <value>
+get <key>
+delete <key>
+range <start> <end>
+
+# observability
+stats
+sstables
+
+# exit
+exit
+```
+
+**Example**
+```
+bedrockdb> put user:1 abhiram
+OK
+
+bedrockdb> get user:1
+abhiram
+
+bedrockdb> stats
+memtable_size=3
+immutable=false
+sst_count=1
+
+bedrockdb> sstables
+[0] data/sst-000001.sst
+```
+
+---
 
 ## Run
-
 ```bash
-# local
-go run cmd/api/main.go
+# HTTP server
+go run cmd/server/main.go
+
+# CLI
+go run cmd/cli/main.go
 
 # docker
 docker compose up --build
 ```
 
 Server listens on `:8080`. Data directory defaults to `./data`.
-
----
-
 ## Benchmarks
 
 All benchmarks on Linux/amd64, 13th Gen Intel Core i7-13650HX.
@@ -163,7 +203,10 @@ Cache hit at 237ns allocates nothing — bloom filter test, LRU map lookup, and 
 
 **P99 spikes (~520–625ms)** — WAL fsync and memtable flush compete with foreground requests under sustained load. P50 and P90 remain stable — the spike affects fewer than 1% of requests.
 
-**RANGE P50 is 4.58ms** — `ScanAll()` reads every SSTable block sequentially. Range is a full scan, not a point lookup. Expected behaviour for an LSM tree.
+**RANGE P50 is 4.58ms** — range queries perform an N-way heap merge across the memtable 
+and all SSTables, with per-SSTable block scans feeding the heap. Latency scales with the 
+number of SSTables and result set size. Expected behaviour for an LSM tree without 
+seek-based SSTable iterators.
 
 **LSM write semantics** — BedrockDB follows LSM tree design. Writes are sequential appends — fast on any storage media. Reads are optimised via bloom filters and LRU block cache to minimise read amplification across SSTables.
 
