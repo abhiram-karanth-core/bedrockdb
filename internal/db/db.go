@@ -129,14 +129,13 @@ func (db *DB) compact() {
 	}
 	db.compacting = true
 
-	k := compaction.L0CompactionThreshold
-	if len(db.sstables) < k {
+	selected := db.sizeTieredGroup()
+	if selected == nil {
 		db.compacting = false
 		db.mu.Unlock()
 		return
 	}
-	selected := db.sstables[:k]
-	paths := make([]string, k)
+	paths := make([]string, len(selected))
 	for i, sst := range selected {
 		paths[i] = sst.Path
 	}
@@ -163,23 +162,35 @@ func (db *DB) compact() {
 		return
 	}
 
-	//install result safely
 	db.mu.Lock()
-
-	// state validation: abort if SST set changed during compaction
-	for i := 0; i < k; i++ {
-		if db.sstables[i].Path != paths[i] {
+	compacted := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		compacted[p] = struct{}{}
+	}
+	for _, p := range paths {
+		found := false
+		for _, sst := range db.sstables {
+			if sst.Path == p {
+				found = true
+				break
+			}
+		}
+		if !found {
 			db.mu.Unlock()
 			r.Close()
 			return
 		}
 	}
-	remaining := make([]*sstable.Reader, len(db.sstables)-k)
-	copy(remaining, db.sstables[k:])
-	for _, sst := range selected {
-		sst.Close()
+	remaining := make([]*sstable.Reader, 0, len(db.sstables)-len(paths)+1)
+	remaining = append(remaining, r)
+	for _, sst := range db.sstables {
+		if _, skip := compacted[sst.Path]; skip {
+			sst.Close()
+		} else {
+			remaining = append(remaining, sst)
+		}
 	}
-	db.sstables = append([]*sstable.Reader{r}, remaining...)
+	db.sstables = remaining
 	db.nextSST++
 
 	db.mu.Unlock()
@@ -239,9 +250,8 @@ func (db *DB) flush() {
 	db.sstables = append([]*sstable.Reader{r}, db.sstables...)
 	db.nextSST++
 	db.immutable = nil
-	// db.flushing = false
 
-	if len(db.sstables) >= compaction.L0CompactionThreshold && !db.compacting {
+	if db.sizeTieredGroup() != nil && !db.compacting {
 		go db.compact()
 	}
 	db.mu.Unlock()
@@ -343,4 +353,56 @@ func (db *DB) SSTables() string {
 	}
 
 	return out.String()
+}
+
+// sizeTieredGroups groups sstables into buckets where max/min size < bucketRatio.
+// Returns the first bucket that hits compactionThreshold, or nil.
+func (db *DB) sizeTieredGroup() []*sstable.Reader {
+	const bucketRatio = 2.0
+	const threshold = compaction.L0CompactionThreshold
+
+	if len(db.sstables) == 0 {
+		return nil
+	}
+
+	// get file sizes
+	type sized struct {
+		r    *sstable.Reader
+		size int64
+	}
+	files := make([]sized, 0, len(db.sstables))
+	for _, sst := range db.sstables {
+		info, err := os.Stat(sst.Path)
+		if err != nil {
+			continue
+		}
+		files = append(files, sized{sst, info.Size()})
+	}
+
+	// sort by size ascending
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].size < files[j].size
+	})
+
+	// slide a window: expand while max/min < bucketRatio
+	for i := 0; i < len(files); {
+		j := i + 1
+		for j < len(files) {
+			ratio := float64(files[j].size) / float64(files[i].size)
+			if ratio > bucketRatio {
+				break
+			}
+			j++
+		}
+		// files[i:j] is one bucket
+		if j-i >= threshold {
+			group := make([]*sstable.Reader, j-i)
+			for k, f := range files[i:j] {
+				group[k] = f.r
+			}
+			return group
+		}
+		i = j
+	}
+	return nil
 }
