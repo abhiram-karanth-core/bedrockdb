@@ -65,13 +65,11 @@ func Open(dir string) (*DB, error) {
 }
 
 func (db *DB) Put(key, value string) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	if err := db.wal.Write([]byte(key), []byte(value)); err != nil {
 		return fmt.Errorf("db: wal write: %w", err)
 	}
-
+	db.mu.Lock()
+	defer db.mu.Unlock()
 	db.memtable.Put(key, value)
 
 	if db.memtable.IsFull() && !db.flushing {
@@ -140,6 +138,7 @@ func (db *DB) compact() {
 		paths[i] = sst.Path
 	}
 	nextSST := db.nextSST
+	db.nextSST++
 	db.mu.Unlock()
 
 	// release ownership
@@ -191,8 +190,6 @@ func (db *DB) compact() {
 		}
 	}
 	db.sstables = remaining
-	db.nextSST++
-
 	db.mu.Unlock()
 }
 func (db *DB) startFlush() {
@@ -210,10 +207,11 @@ func (db *DB) flush() {
 		db.flushing = false
 		db.mu.Unlock()
 	}()
-	db.mu.RLock()
+	db.mu.Lock()
 	sstPath := filepath.Join(db.dir, fmt.Sprintf("sst-%06d.sst", db.nextSST))
 	imm := db.immutable
-	db.mu.RUnlock()
+	db.nextSST++
+	db.mu.Unlock()
 
 	keyCount := uint(0)
 	imm.Ascend(func(key, value string) bool {
@@ -248,15 +246,13 @@ func (db *DB) flush() {
 
 	db.mu.Lock()
 	db.sstables = append([]*sstable.Reader{r}, db.sstables...)
-	db.nextSST++
 	db.immutable = nil
 
+	db.rotateWALWithoutMutex()
 	if db.sizeTieredGroup() != nil && !db.compacting {
 		go db.compact()
 	}
 	db.mu.Unlock()
-
-	db.rotateWAL()
 }
 
 func (db *DB) rotateWAL() {
@@ -405,4 +401,16 @@ func (db *DB) sizeTieredGroup() []*sstable.Reader {
 		i = j
 	}
 	return nil
+}
+
+func (db *DB) rotateWALWithoutMutex() {
+	walPath := filepath.Join(db.dir, walFileName)
+	db.wal.Close()
+	os.Truncate(walPath, 0)
+	w, err := wal.Open(walPath)
+	if err != nil {
+		fmt.Printf("db: rotate wal: %v\n", err)
+		return
+	}
+	db.wal = w
 }
