@@ -180,7 +180,7 @@ Cache hit at 237ns allocates nothing — bloom filter test, LRU map lookup, and 
 
 | Benchmark | ns/op | Notes |
 |---|---|---|
-| Put | 725 | WAL write + memtable insert |
+| Put | 725 | WAL write (lock-free) + memtable insert |
 | Get | 52 | Memtable hit |
 | MixedWorkload (80% read) | 770 | — |
 
@@ -189,24 +189,19 @@ Cache hit at 237ns allocates nothing — bloom filter test, LRU map lookup, and 
 | Benchmark | Duration | Notes |
 |---|---|---|
 | 4 SSTables × 500 keys | 2.18ms | N-way heap merge |
-
+---
 ### HTTP (wrk2, 20 connections, 30s, corrected for coordinated omission)
 
 | Endpoint | RPS | P50 | P90 | P99 |
 |---|---|---|---|---|
-| PUT | 500 | 1.36ms | 2.71ms | 521ms |
-| GET (cache hit) | 2000 | 1.06ms | 1.76ms | 625ms |
-| GET (absent key) | 2000 | 1.04ms | 1.80ms | 621ms |
-| RANGE | 200 | 4.58ms | 7.26ms | 622ms |
+| PUT | 500 | 1.25ms | 2.29ms | 3.53ms |
+| GET (cache hit) | 2000 | 0.97ms | 1.66ms | 2.18ms |
+| GET (absent key) | 2000 | 1.05ms | 1.70ms | 2.17ms |
+| RANGE | 200 | 3.95ms | 5.60ms | 8.33ms |
 
 **GET vs GET miss are nearly identical** — bloom filter rejection (98ns) is invisible at the HTTP level. Latency is dominated by HTTP stack overhead, not the storage engine.
 
-**P99 spikes (~520–625ms)** — WAL fsync and memtable flush compete with foreground requests under sustained load. P50 and P90 remain stable — the spike affects fewer than 1% of requests.
-
-**RANGE P50 is 4.58ms** — range queries perform an N-way heap merge across the memtable 
-and all SSTables, with per-SSTable block scans feeding the heap. Latency scales with the 
-number of SSTables and result set size. Expected behaviour for an LSM tree without 
-seek-based SSTable iterators.
+**RANGE P50 is 3.95ms** — range queries perform an N-way heap merge across the memtable and all SSTables, with per-SSTable block scans feeding the heap. Latency scales with the number of SSTables and result set size. Expected behaviour for an LSM tree without seek-based SSTable iterators.
 
 **LSM write semantics** — BedrockDB follows LSM tree design. Writes are sequential appends — fast on any storage media. Reads are optimised via bloom filters and LRU block cache to minimise read amplification across SSTables.
 
