@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 )
 
 const (
@@ -31,6 +30,7 @@ type DB struct {
 	nextSST    int
 	closeOnce  sync.Once
 	closeCh    chan struct{}
+	flushCond  *sync.Cond
 }
 
 func Open(dir string) (*DB, error) {
@@ -50,7 +50,7 @@ func Open(dir string) (*DB, error) {
 		memtable: memtable.New(defaultMemtableSize),
 		closeCh:  make(chan struct{}),
 	}
-
+	db.flushCond = sync.NewCond(&db.mu)
 	if err := w.Replay(func(key, value []byte) {
 		db.memtable.Put(string(key), string(value))
 	}); err != nil {
@@ -205,6 +205,7 @@ func (db *DB) flush() {
 	defer func() {
 		db.mu.Lock()
 		db.flushing = false
+		db.flushCond.Broadcast()
 		db.mu.Unlock()
 	}()
 	db.mu.Lock()
@@ -292,38 +293,25 @@ func (db *DB) loadSSTables() error {
 }
 
 func (db *DB) Close() error {
-	db.closeOnce.Do(func() {
-		close(db.closeCh)
-	})
+	db.closeOnce.Do(func() { close(db.closeCh) })
 
 	db.mu.Lock()
+	defer db.mu.Unlock()
 
 	for db.flushing {
-		db.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		db.mu.Lock()
+		db.flushCond.Wait()
 	}
-
 	if db.memtable.Size() > 0 {
 		db.startFlush()
-		db.mu.Unlock()
-		for {
-			time.Sleep(10 * time.Millisecond)
-			db.mu.Lock()
-			if !db.flushing {
-				break
-			}
-			db.mu.Unlock()
+		for db.flushing {
+			db.flushCond.Wait()
 		}
 	}
-
-	defer db.mu.Unlock()
 
 	db.wal.Close()
 	for _, sst := range db.sstables {
 		sst.Close()
 	}
-
 	return nil
 }
 
