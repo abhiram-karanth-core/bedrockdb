@@ -85,17 +85,20 @@ func (db *DB) Delete(key string) error {
 
 func (db *DB) Get(key string) (string, bool, error) {
 	db.mu.RLock()
-	defer db.mu.RUnlock()
+	imm := db.immutable
+	ssts := db.sstables
+	mem := db.memtable
+	db.mu.RUnlock()
 
-	if val, found := db.memtable.Get(key); found {
+	if val, found := mem.Get(key); found {
 		if memtable.IsTombstone(val) {
 			return "", false, nil
 		}
 		return val, true, nil
 	}
 
-	if db.immutable != nil {
-		if val, found := db.immutable.Get(key); found {
+	if imm != nil {
+		if val, found := imm.Get(key); found {
 			if memtable.IsTombstone(val) {
 				return "", false, nil
 			}
@@ -103,7 +106,7 @@ func (db *DB) Get(key string) (string, bool, error) {
 		}
 	}
 
-	for _, sst := range db.sstables {
+	for _, sst := range ssts {
 		val, found, err := sst.Get(key)
 		if err != nil {
 			return "", false, fmt.Errorf("db: sstable get: %w", err)
