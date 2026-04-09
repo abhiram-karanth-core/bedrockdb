@@ -73,15 +73,9 @@ func (db *DB) Range(start, end string) ([]RangeEntry, error) {
 	sources = append(sources, immEntries)
 
 	for _, sst := range db.sstables {
-		all, err := sst.ScanAll()
-		if err != nil {
+		filtered, err := sst.Scan(start, end)
+		if err !=nil{
 			return nil, fmt.Errorf("db: range scan: %w", err)
-		}
-		var filtered []sstable.Entry
-		for _, e := range all {
-			if e.Key >= start && e.Key <= end {
-				filtered = append(filtered, e)
-			}
 		}
 		sources = append(sources, filtered)
 	}
