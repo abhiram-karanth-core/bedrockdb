@@ -19,20 +19,24 @@ const (
 )
 
 type DB struct {
-	mu         sync.RWMutex
-	dir        string
-	wal        *wal.WAL
-	memtable   *memtable.Memtable
-	immutable  *memtable.Memtable
-	sstables   []*sstable.Reader
-	flushing   bool
-	compacting bool
-	nextSST    int
-	closeOnce  sync.Once
-	closeCh    chan struct{}
-	flushCond  *sync.Cond
+	mu           sync.RWMutex
+	dir          string
+	wal          *wal.WAL
+	memtable     *memtable.Memtable
+	immutable    *memtable.Memtable
+	sstables     []*sstable.Reader
+	flushing     bool
+	compacting   bool
+	nextSST      int
+	closeOnce    sync.Once
+	closeCh      chan struct{}
+	flushCond    *sync.Cond
+	memtableSize int64
 }
-
+func (db *DB) SetMemtableSize(size int64) {
+    db.memtableSize = size
+    db.memtable.SetMaxSize(size)
+}
 func Open(dir string) (*DB, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("db: mkdir: %w", err)
@@ -45,11 +49,13 @@ func Open(dir string) (*DB, error) {
 	}
 
 	db := &DB{
-		dir:      dir,
-		wal:      w,
-		memtable: memtable.New(defaultMemtableSize),
-		closeCh:  make(chan struct{}),
+		dir:          dir,
+		wal:          w,
+		memtable:     memtable.New(defaultMemtableSize),
+		closeCh:      make(chan struct{}),
+		memtableSize: defaultMemtableSize,
 	}
+	db.memtable = memtable.New(db.memtableSize)
 	db.flushCond = sync.NewCond(&db.mu)
 	if err := w.Replay(func(key, value []byte) {
 		db.memtable.Put(string(key), string(value))
@@ -197,7 +203,7 @@ func (db *DB) compact() {
 }
 func (db *DB) startFlush() {
 	db.immutable = db.memtable
-	db.memtable = memtable.New(defaultMemtableSize)
+	db.memtable = memtable.New(db.memtableSize)
 	db.flushing = true
 	go db.flush()
 }
