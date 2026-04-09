@@ -171,7 +171,7 @@ Group commit delivers a **1,181× throughput advantage** over fsync-per-write. T
 | BlockEncode | 502 | 0 | Pure memcopy into pre-allocated 4KB buffer |
 | BlockDecode | 2,961 | 191 | One allocation per entry (Go string conversion) |
 | GetCacheHit | 237 | 0 | Bloom check + LRU lookup + linear scan, no decode |
-| GetCacheMiss | 11,173 | 373 | pread + decode |
+| GetCacheMiss | 6,644 | 350 | pread + decode |
 | BloomFilterReject | 98 | 2 | Absent keys rejected before any I/O |
 
 Cache hit at 237ns allocates nothing — bloom filter test, LRU map lookup, and linear scan over already-decoded entries stay on the stack or in existing heap objects. Block decode cost (191 allocs) is paid once per cache miss, then amortised across all subsequent reads of that block.
@@ -182,6 +182,7 @@ Cache hit at 237ns allocates nothing — bloom filter test, LRU map lookup, and 
 |---|---|---|
 | Put | 725 | WAL write (lock-free) + memtable insert |
 | Get | 52 | Memtable hit |
+| Get (SSTable cache miss) | 4,637 | Full stack: memtable miss → SSTable cold pread |
 | MixedWorkload (80% read) | 770 | — |
 
 ### Compaction
@@ -194,9 +195,9 @@ Cache hit at 237ns allocates nothing — bloom filter test, LRU map lookup, and 
 
 | Endpoint | RPS | P50 | P90 | P99 |
 |---|---|---|---|---|
-| PUT | 500 | 1.25ms | 2.29ms | 3.53ms |
-| GET (cache hit) | 2000 | 0.97ms | 1.66ms | 2.18ms |
-| GET (absent key) | 2000 | 1.05ms | 1.70ms | 2.17ms |
+| PUT | 500 | 0.99ms | 1.60ms | 2.36ms |
+| GET (cache hit) | 2000 | 0.91ms | 1.53ms | 1.96ms |
+| GET (absent key) | 2000 | 0.92ms | 1.59ms | 2.05ms |
 | RANGE | 200 | 3.95ms | 5.60ms | 8.33ms |
 
 **GET vs GET miss are nearly identical** — bloom filter rejection (98ns) is invisible at the HTTP level. Latency is dominated by HTTP stack overhead, not the storage engine.
