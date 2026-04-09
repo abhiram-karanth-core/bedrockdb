@@ -30,7 +30,7 @@ func Open(path string) (*Reader, error) {
 	r := &Reader{
 		file:  f,
 		fd:    f.Fd(),
-		Path:  path, 
+		Path:  path,
 		cache: newLRUCache(defaultCacheCapacity),
 	}
 
@@ -201,6 +201,21 @@ func (r *Reader) Close() error {
 	return r.file.Close()
 }
 
+func (r *Reader) SeekBlockFirstIdx(key string) int{
+	entries := r.index
+	low, high := 0, len(entries)-1
+	result := 0
+	for low <= high {
+		mid := (low + high) / 2
+		if entries[mid].firstKey <= key {
+			result = mid
+			low = mid + 1
+		}else{
+			high = mid-1
+		}
+	}
+	return result
+}
 func (r *Reader) ScanAll() ([]Entry, error) {
 	var all []Entry
 
@@ -213,4 +228,42 @@ func (r *Reader) ScanAll() ([]Entry, error) {
 	}
 
 	return all, nil
+}
+func (r *Reader) Scan(start, end string)([]Entry, error){
+	if len(r.index) == 0 {
+		return nil, nil
+	}
+	blockIdx := r.SeekBlockFirstIdx(start)
+	var entries []Entry 
+	for i:= blockIdx; i< len(r.index);i++{
+		offset := r.index[i].blockOffset
+		var cached []Entry 
+		if c, ok := r.cache.Get(offset); ok{
+			cached = c
+		}else{
+			block, err := r.readBlock(offset)
+			if err != nil{
+				return nil, err
+			}
+			r.cache.Put(offset, block)
+			cached = block
+		}
+		done := false
+		for _,e := range cached{
+			if e.Key >end{
+				done = true
+				break
+			}
+			if e.Key >=start{
+				entries = append(entries, e)
+			}
+		}
+		if done{
+			break
+		}
+	}
+	return entries, nil
+}
+func (r *Reader) ClearCache() {
+	r.cache.Clear()
 }
