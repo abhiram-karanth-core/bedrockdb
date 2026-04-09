@@ -170,11 +170,23 @@ Group commit delivers a **1,181× throughput advantage** over fsync-per-write. T
 |---|---|---|---|
 | BlockEncode | 502 | 0 | Pure memcopy into pre-allocated 4KB buffer |
 | BlockDecode | 2,961 | 191 | One allocation per entry (Go string conversion) |
-| GetCacheHit | 237 | 0 | Bloom check + LRU lookup + linear scan, no decode |
-| GetCacheMiss | 6,644 | 350 | pread + decode |
-| BloomFilterReject | 98 | 2 | Absent keys rejected before any I/O |
+| Get (Memtable) | ~45 | 1 | Pure in-memory lookup |
+| Get (SST cache hit) | ~550 | 2 | Bloom check + LRU hit + scan, no decode |
+| Get (SST cache miss) | ~4600 | 149 | pread + full block decode |
 
-Cache hit at 237ns allocates nothing — bloom filter test, LRU map lookup, and linear scan over already-decoded entries stay on the stack or in existing heap objects. Block decode cost (191 allocs) is paid once per cache miss, then amortised across all subsequent reads of that block.
+Cache hit at ~550ns incurs minimal overhead (~2 allocations), primarily from key/value handling, while avoiding block decode entirely.
+
+Cache hit avoids block decode entirely, reusing already-decoded entries from the LRU cache.
+
+Block decode dominates the cold read path — ~150 allocations per block — but is amortised across subsequent cache hits via the LRU.
+
+**Read path characteristics** — BedrockDB exhibits three distinct latency tiers:
+
+- Memtable hits (~45ns): direct in-memory access
+- SSTable cache hits (~550ns): decoded blocks reused via LRU
+- SSTable cache misses (~4.6µs): require pread + block decode (~150 allocations)
+
+This separation ensures predictable performance — hot data is served from cache with minimal overhead, while cold reads remain efficient due to 4KB aligned I/O and bounded decode cost.
 
 ### DB layer
 
@@ -196,13 +208,13 @@ Cache hit at 237ns allocates nothing — bloom filter test, LRU map lookup, and 
 | Endpoint | RPS | P50 | P90 | P99 |
 |---|---|---|---|---|
 | PUT | 500 | 0.99ms | 1.60ms | 2.36ms |
-| GET (cache hit) | 2000 | 0.91ms | 1.53ms | 1.96ms |
+| GET (cache hit) | 1000 | 0.91ms | 1.53ms | 1.96ms |
+| GET (cache miss, cold) | 1000 | 1.05ms | 1.67ms | 2.13ms |
 | GET (absent key) | 2000 | 0.92ms | 1.59ms | 2.05ms |
-| RANGE | 200 | 3.95ms | 5.60ms | 8.33ms |
+| RANGE (cold, no cache) | 3000 | 1.39ms | 1.79ms | 2.36ms |
 
 **GET vs GET miss are nearly identical** — bloom filter rejection (98ns) is invisible at the HTTP level. Latency is dominated by HTTP stack overhead, not the storage engine.
 
-**RANGE P50 is 3.95ms** — range queries perform an N-way heap merge across the memtable and all SSTables, with per-SSTable block scans feeding the heap. Latency scales with the number of SSTables and result set size. Expected behaviour for an LSM tree without seek-based SSTable iterators.
 
 **LSM write semantics** — BedrockDB follows LSM tree design. Writes are sequential appends — fast on any storage media. Reads are optimised via bloom filters and LRU block cache to minimise read amplification across SSTables.
 
