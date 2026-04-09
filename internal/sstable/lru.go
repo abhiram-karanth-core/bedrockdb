@@ -70,3 +70,9 @@ func (c *lruCache) Len() int {
 	defer c.mu.Unlock()
 	return c.list.Len()
 }
+func (c *lruCache) Clear() {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    c.list.Init()
+    c.items = make(map[uint64]*list.Element, c.capacity)
+}
