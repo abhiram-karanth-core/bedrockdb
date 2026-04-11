@@ -13,6 +13,7 @@ LRU block cache. No external storage dependencies.
 Write path:  WAL → Memtable → (flush) → SSTable
 Read path:   Memtable → Bloom filter → Sparse index → LRU block cache → Block decode
 Range path:  N-way heap merge across Memtable + SSTables → deduplicate → filter tombstones
+Compaction (background): SSTables → N-way heap merge → fewer SSTables (Triggered when a size bucket reaches threshold)
 ```
 
 **Write-ahead log (WAL)** — Group commit batches concurrent writes into a single fsync. Every write is durable before ack. Writers never block waiting for fsync.
@@ -173,10 +174,9 @@ Group commit delivers a **1,181× throughput advantage** over fsync-per-write. T
 | Get (Memtable) | ~45 | 1 | Pure in-memory lookup |
 | Get (SST cache hit) | ~550 | 2 | Bloom check + LRU hit + scan, no decode |
 | Get (SST cache miss) | ~4600 | 149 | pread + full block decode |
+| BloomFilterReject | 98 | 2 | Absent keys rejected before any I/O |
 
-Cache hit at ~550ns incurs minimal overhead (~2 allocations), primarily from key/value handling, while avoiding block decode entirely.
-
-Cache hit avoids block decode entirely, reusing already-decoded entries from the LRU cache.
+Cache hit avoids block decode entirely — decoded entries are reused directly from the LRU cache. The ~2 allocations are key/value handling only.
 
 Block decode dominates the cold read path — ~150 allocations per block — but is amortised across subsequent cache hits via the LRU.
 
@@ -187,6 +187,17 @@ Block decode dominates the cold read path — ~150 allocations per block — but
 - SSTable cache misses (~4.6µs): require pread + block decode (~150 allocations)
 
 This separation ensures predictable performance — hot data is served from cache with minimal overhead, while cold reads remain efficient due to 4KB aligned I/O and bounded decode cost.
+
+### Range
+
+| Benchmark | Window | ns/op | Notes |
+|---|---|---|---|
+| Range (memtable, small) | 100 keys | ~11,250 | In-memory B-tree scan, no I/O |
+| Range (memtable, large) | 800 keys | ~81,000 | Same path, 8× more keys |
+| Range (SST cache hit) | 100 keys | ~10,900 | Blocks warm in LRU, no pread |
+| Range (SST cold, 5 SSTables) | 30k keys | ~5,500,000 | N-way heap merge, full block decodes |
+
+Cache hit (~10,900ns) ≈ memtable (~11,250ns) for the same window — once blocks are warm in the LRU, the SSTable path costs the same as an in-memory scan. The ~350ns gap is bloom filter + sparse index lookup overhead. Cold multi-SST (5.5ms) is the pathological case: wide range + cold cache + 5 SSTables simultaneously.
 
 ### DB layer
 
@@ -242,3 +253,12 @@ Both compaction and range queries require merging N sorted streams into one glob
 
 **Why size-tiered compaction?**
 Size-tiered groups files of similar size rather than compacting by key range overlap (leveled) or recency (FIFO). This minimises write amplification — files are only rewritten when merged with peers of similar size, not on every level push. The tradeoff is higher read amplification than leveled compaction, mitigated by bloom filters and the LRU block cache. Cassandra uses the same strategy as its default for write-heavy workloads.
+
+**Why double-buffer immutable memtable?**
+When the active memtable hits the size threshold, it is frozen in place as the immutable memtable and a fresh memtable takes writes immediately. The flush goroutine drains the immutable to an SSTable in the background. Writers never stall waiting for a flush to complete — the double-buffer decouples write throughput from disk I/O latency.
+
+**Why `sync.Cond` over busy-poll in `Close()`?**
+The original `Close()` spun in a tight loop checking `db.flushing`. Replaced with `sync.Cond` — the goroutine sleeps until the flush goroutine signals completion. Eliminates CPU waste during shutdown with no change in correctness.
+
+**Why string conversion on block decode?**
+`BlockDecode` allocates once per entry — `string(buf[...])` copies bytes out of the block's backing buffer rather than returning a subslice. A `[]byte` subslice would be zero-copy and eliminate the 191 allocs, but it would pin the entire 4KB block buffer in memory for as long as the caller holds the value. The LRU cache evicts the block logically, but the GC cannot collect the backing array until all references are gone — breaking the memory boundedness the cache is designed to provide. The allocation cost is paid once per cache miss and amortised across all subsequent hits on that block.
