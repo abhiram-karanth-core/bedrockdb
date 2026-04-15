@@ -23,6 +23,81 @@ Compaction (background): SSTables → N-way heap merge → fewer SSTables (Trigg
 **SSTable** — Immutable on-disk files with a three-layer read path: bloom filter (skip absent keys), binary-searched sparse index (find the right block), LRU block cache (avoid redundant decodes). SSTables are maintained in newest-first order, ensuring recent updates shadow older versions during lookups and compaction.
 
 **Compaction** — Size-tiered compaction groups SSTables into size buckets where max_size / min_size < 2.0 and compacts any bucket that reaches the threshold. Two tiers emerge naturally — small (fresh memtable flushes) and large (previous compaction outputs) — each compacting independently when their bucket fills. Duplicate keys are resolved by recency and tombstones are dropped at compaction time. Read amplification is bounded at 2 * (threshold - 1) + 2 sources per lookup.
+Read amplification under this strategy is bounded and can be derived analytically (see below).
+
+---
+
+## Read Amplification Bound
+
+In the worst case, a point lookup for a missing key must prove absence by checking every possible data source. The bound below counts how many sources a read may need to consult in that scenario.
+
+### What the formula counts
+
+A lookup for a non-existent key cannot terminate early — it must exhaust all sources (memtables and SSTables) to guarantee the key does not exist. The formula captures this worst-case fan-out.
+
+### The fixed cost (+2)
+
+Every read always checks:
+
+- Active memtable — contains the most recent writes  
+- Immutable memtable — a frozen memtable waiting to be flushed  
+
+These are always present regardless of compaction state:
++1 (active memtable)
++1 (immutable memtable)
+= +2
+
+### Why each tier contributes (T − 1)
+
+In size-tiered compaction, SSTables are grouped into buckets of similar size. A compaction is triggered when a bucket accumulates **T** files.
+
+This implies:
+
+- A tier can hold at most **T − 1** SSTables without triggering compaction  
+- At exactly **T**, compaction merges them into one file in the next tier  
+
+In the worst case, both tiers are just below their thresholds:
+
+- Small tier (recent flushes): **T − 1 SSTables**  
+- Large tier (previous compactions): **T − 1 SSTables**  
+
+A read must probe all of them.
+
+### Putting it together
+
+active memtable → 1
+immutable memtable → 1
+small-tier SSTables → T − 1
+large-tier SSTables → T − 1
+
+total sources = 2(T − 1) + 2
+
+
+For example, with **T = 4**:
+
+
+2(3) + 2 = 8 sources
+
+
+Each SSTable probe involves:
+
+- A bloom filter check (cheap)  
+- A possible disk read if the filter passes (expensive)  
+
+So this bound has real latency implications on cache misses.
+
+### The tradeoff
+
+The threshold **T** directly controls the balance between read and write cost:
+
+- Higher **T** → fewer compactions → lower write amplification  
+- But also → more SSTables per tier → higher read amplification  
+
+This is the core tradeoff of size-tiered compaction:
+
+You reduce write cost by increasing **T**, but pay for it with increased read fan-out.
+
+---
 
 ### SSTable file layout
 
@@ -44,104 +119,12 @@ The 4KB block size aligns with Linux page size and NVMe sector size — a single
 > Not sure how a storage engine differs from a database like PostgreSQL?
 > [What BedrockDB is — and what it isn't →](https://bedrockdb-docs.vercel.app/)
 
----
 
-## HTTP API
-
-```bash
-# write
-curl -X PUT http://localhost:8080/key/{key} \
-  -H "Content-Type: application/json" \
-  -d '{"value": "..."}'
-
-# read
-curl http://localhost:8080/key/{key}
-
-# delete
-curl -X DELETE http://localhost:8080/key/{key}
-
-# range query — returns all keys in [start, end] inclusive, sorted
-curl "http://localhost:8080/range?start=a&end=z"
-```
-
-### Example responses
-
-```bash
-# PUT
-curl -X PUT http://localhost:8080/key/city \
-  -H "Content-Type: application/json" \
-  -d '{"value": "bangalore"}'
-# {"key":"city","value":"bangalore"}
-
-# GET
-curl http://localhost:8080/key/city
-# {"key":"city","value":"bangalore"}
-
-# RANGE
-curl "http://localhost:8080/range?start=city&end=name"
-# [{"key":"city","value":"bangalore"},{"key":"name","value":"alice"}]
-
-# GET deleted key
-curl http://localhost:8080/key/city
-# {"error":"not found"}
-```
-
----
-## CLI (Interactive Shell)
-
-BedrockDB provides an interactive CLI for local debugging and inspection of the storage engine.
-```bash
-go run cmd/cli/main.go
-```
-
-**Supported commands**
-```
-# basic operations
-put <key> <value>
-get <key>
-delete <key>
-range <start> <end>
-
-# observability
-stats
-sstables
-
-# exit
-exit
-```
-
-**Example**
-```
-bedrockdb> put user:1 abhiram
-OK
-
-bedrockdb> get user:1
-abhiram
-
-bedrockdb> stats
-memtable_size=3
-immutable=false
-sst_count=1
-
-bedrockdb> sstables
-[0] data/sst-000001.sst
-```
+> See how to run and use?
+>[API & Usage ->](usage.md)
 
 ---
 
-## Run
-```bash
-# HTTP server
-go run cmd/server/main.go
-
-# CLI
-go run cmd/cli/main.go
-
-# docker
-docker compose up --build
-```
-
-Server listens on `:8080`. Data directory defaults to `./data`.
 ## Benchmarks
 
 All benchmarks on Linux/amd64, 13th Gen Intel Core i7-13650HX.
