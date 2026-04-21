@@ -70,7 +70,18 @@ func (it *sstIterator) next() sstable.Entry {
 	return e
 }
 
-func Compact(inputPaths []string, outputPath string, isDeepest bool) error {
+func canDropTombstone(key string, externalSSTs []*sstable.Reader) bool {
+	for _, sst := range externalSSTs {
+		if sst.MinKey <= key && key <= sst.MaxKey {
+			 if sst.MightContain(key) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func Compact(inputPaths []string, outputPath string, externalSSTs []*sstable.Reader) error {
 	if len(inputPaths) == 0 {
 		return nil
 	}
@@ -130,7 +141,7 @@ func Compact(inputPaths []string, outputPath string, isDeepest bool) error {
 		lastKey = entry.key
 
 		if entry.value == "\x00TOMBSTONE\x00" {
-			if !isDeepest {
+			if !canDropTombstone(entry.key, externalSSTs) {
 				if err := w.Add(entry.key, entry.value); err != nil {
 					return fmt.Errorf("compaction: add tombstone: %w", err)
 				}
@@ -155,9 +166,9 @@ func Compact(inputPaths []string, outputPath string, isDeepest bool) error {
 	return w.Finish()
 }
 
-func CompactDir(dir string, l0Paths []string, nextSST int) (string, error) {
+func CompactDir(dir string, l0Paths []string, nextSST int, externalSSTs []*sstable.Reader) (string, error) {
 	outputPath := filepath.Join(dir, fmt.Sprintf("sst-%06d.sst", nextSST))
-	if err := Compact(l0Paths, outputPath, true); err != nil {
+	if err := Compact(l0Paths, outputPath, externalSSTs); err != nil {
 		return "", err
 	}
 	for _, path := range l0Paths {
