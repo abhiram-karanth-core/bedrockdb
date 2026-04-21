@@ -33,9 +33,10 @@ type DB struct {
 	flushCond    *sync.Cond
 	memtableSize int64
 }
+
 func (db *DB) SetMemtableSize(size int64) {
-    db.memtableSize = size
-    db.memtable.SetMaxSize(size)
+	db.memtableSize = size
+	db.memtable.SetMaxSize(size)
 }
 func Open(dir string) (*DB, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -77,7 +78,8 @@ func (db *DB) Put(key, value string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	db.memtable.Put(key, value)
-
+	fmt.Printf("DEBUG put: size=%d max=%d full=%v flushing=%v\n",
+		db.memtable.Size(), db.memtableSize, db.memtable.IsFull(), db.flushing)
 	if db.memtable.IsFull() && !db.flushing {
 		db.startFlush()
 	}
@@ -146,6 +148,16 @@ func (db *DB) compact() {
 	for i, sst := range selected {
 		paths[i] = sst.Path
 	}
+	compacting := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		compacting[p] = struct{}{}
+	}
+	var externalSSTs []*sstable.Reader
+	for _, sst := range db.sstables {
+		if _, ok := compacting[sst.Path]; !ok {
+			externalSSTs = append(externalSSTs, sst)
+		}
+	}
 	nextSST := db.nextSST
 	db.nextSST++
 	db.mu.Unlock()
@@ -158,7 +170,7 @@ func (db *DB) compact() {
 	}()
 
 	// run compaction
-	outputPath, err := compaction.CompactDir(db.dir, paths, nextSST)
+	outputPath, err := compaction.CompactDir(db.dir, paths, nextSST, externalSSTs)
 	if err != nil {
 		fmt.Printf("db: compact: %v\n", err)
 		return
