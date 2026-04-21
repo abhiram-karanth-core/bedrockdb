@@ -13,12 +13,14 @@ import (
 const defaultCacheCapacity = 256
 
 type Reader struct {
-	file  *os.File
-	fd    uintptr
-	index []indexEntry
-	bloom *bloom.BloomFilter
-	cache *lruCache
-	Path  string
+	file   *os.File
+	fd     uintptr
+	index  []indexEntry
+	bloom  *bloom.BloomFilter
+	cache  *lruCache
+	Path   string
+	MinKey string
+	MaxKey string
 }
 
 func Open(path string) (*Reader, error) {
@@ -110,6 +112,17 @@ func (r *Reader) loadIndex(indexOffset, bloomOffset uint64) error {
 			blockOffset: blockOffset,
 		})
 	}
+	if len(r.index) > 0 {
+		r.MinKey = r.index[0].firstKey
+		// MaxKey = last key in last block, read it now
+		lastBlock, err := r.readBlock(r.index[len(r.index)-1].blockOffset)
+		if err != nil {
+			return fmt.Errorf("sstable reader: read last block for MaxKey: %w", err)
+		}
+		if len(lastBlock) > 0 {
+			r.MaxKey = lastBlock[len(lastBlock)-1].Key
+		}
+	}
 
 	return nil
 }
@@ -172,7 +185,7 @@ func (r *Reader) findBlock(key string) (uint64, bool) {
 	})
 
 	if i == 0 {
-		return 0, false 
+		return 0, false
 	}
 
 	return r.index[i-1].blockOffset, true
@@ -201,7 +214,7 @@ func (r *Reader) Close() error {
 	return r.file.Close()
 }
 
-func (r *Reader) SeekBlockFirstIdx(key string) int{
+func (r *Reader) SeekBlockFirstIdx(key string) int {
 	entries := r.index
 	low, high := 0, len(entries)-1
 	result := 0
@@ -210,8 +223,8 @@ func (r *Reader) SeekBlockFirstIdx(key string) int{
 		if entries[mid].firstKey <= key {
 			result = mid
 			low = mid + 1
-		}else{
-			high = mid-1
+		} else {
+			high = mid - 1
 		}
 	}
 	return result
@@ -229,36 +242,36 @@ func (r *Reader) ScanAll() ([]Entry, error) {
 
 	return all, nil
 }
-func (r *Reader) Scan(start, end string)([]Entry, error){
+func (r *Reader) Scan(start, end string) ([]Entry, error) {
 	if len(r.index) == 0 {
 		return nil, nil
 	}
 	blockIdx := r.SeekBlockFirstIdx(start)
-	var entries []Entry 
-	for i:= blockIdx; i< len(r.index);i++{
+	var entries []Entry
+	for i := blockIdx; i < len(r.index); i++ {
 		offset := r.index[i].blockOffset
-		var cached []Entry 
-		if c, ok := r.cache.Get(offset); ok{
+		var cached []Entry
+		if c, ok := r.cache.Get(offset); ok {
 			cached = c
-		}else{
+		} else {
 			block, err := r.readBlock(offset)
-			if err != nil{
+			if err != nil {
 				return nil, err
 			}
 			r.cache.Put(offset, block)
 			cached = block
 		}
 		done := false
-		for _,e := range cached{
-			if e.Key >end{
+		for _, e := range cached {
+			if e.Key > end {
 				done = true
 				break
 			}
-			if e.Key >=start{
+			if e.Key >= start {
 				entries = append(entries, e)
 			}
 		}
-		if done{
+		if done {
 			break
 		}
 	}
@@ -266,4 +279,8 @@ func (r *Reader) Scan(start, end string)([]Entry, error){
 }
 func (r *Reader) ClearCache() {
 	r.cache.Clear()
+}
+
+func (r *Reader) MightContain(key string) bool {
+    return r.bloom.TestString(key)
 }
