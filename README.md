@@ -13,10 +13,19 @@ LRU block cache. No external storage dependencies.
 Write path:  WAL → Memtable → (flush) → SSTable
 Read path:   Memtable → Bloom filter → Sparse index → LRU block cache → Block decode
 Range path:  N-way heap merge across Memtable + SSTables → deduplicate → filter tombstones
+Crash recovery: WAL replay → Memtable rebuild → resume
 Compaction (background): SSTables → N-way heap merge → fewer SSTables (triggered when a size bucket reaches threshold)
 ```
 
 **Write-ahead log (WAL)** — Group commit batches concurrent writes into a single fsync. Every write is durable before ack. Writers never block waiting for fsync.
+
+**Crash recovery** — On restart, `Open()` replays the WAL into a fresh memtable 
+before accepting any reads or writes. Replay stops at the first incomplete or 
+corrupt record (expected after a crash — the tail write is partial). All records 
+before the corrupt tail are recovered. Once the memtable flushes to an SSTable, 
+the WAL is truncated — only unflushed writes need replay. A clean shutdown 
+(`Close()`) flushes the memtable and truncates the WAL, so restart is instant 
+with nothing to replay.
 
 **Memtable** — Concurrent sorted structure (B-tree) protected by a read-write mutex. Reads take a read lock only — concurrent reads never block each other.
 
