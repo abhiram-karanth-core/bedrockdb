@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -298,18 +299,23 @@ func (db *DB) loadSSTables() error {
 	if err != nil {
 		return err
 	}
-
 	sort.Sort(sort.Reverse(sort.StringSlice(paths)))
-
+	maxID := -1
 	for _, path := range paths {
 		r, err := sstable.Open(path)
 		if err != nil {
 			return fmt.Errorf("db: open sstable %s: %w", path, err)
 		}
 		db.sstables = append(db.sstables, r)
+		base := filepath.Base(path)             // "sst-000011.sst"
+		base = strings.TrimPrefix(base, "sst-") // "000011.sst"
+		base = strings.TrimSuffix(base, ".sst") // "000011"
+		id, err := strconv.Atoi(base)
+		if err == nil && id > maxID {
+			maxID = id
+		}
 	}
-
-	db.nextSST = len(paths)
+	db.nextSST = maxID + 1
 	return nil
 }
 
