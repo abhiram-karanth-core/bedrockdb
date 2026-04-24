@@ -41,39 +41,30 @@ func (h *minHeap) Pop() interface{} {
 }
 
 type sstIterator struct {
-	entries []sstable.Entry
-	pos     int
+	reader *sstable.Reader
+	iter   *sstable.Iterator
 }
 
 func newSSTableIterator(path string) (*sstIterator, error) {
-    r, err := sstable.Open(path)
-    if err != nil {
-        return nil, fmt.Errorf("compaction: open sstable %s: %w", path, err)
-    }
-    defer r.Close()
-
-    entries, err := r.Scan(r.MinKey, r.MaxKey)
-    if err != nil {
-        return nil, fmt.Errorf("compaction: scan %s: %w", path, err)
-    }
-
-    return &sstIterator{entries: entries}, nil
+	r, err := sstable.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("compaction: open %s: %w", path, err)
+	}
+	return &sstIterator{reader: r, iter: r.NewIterator()}, nil
 }
 
-func (it *sstIterator) hasNext() bool {
-	return it.pos < len(it.entries)
-}
-
-func (it *sstIterator) next() sstable.Entry {
-	e := it.entries[it.pos]
-	it.pos++
+func (it *sstIterator) hasNext() bool        { return it.iter.Valid() }
+func (it *sstIterator) next() sstable.Entry  {
+	e := it.iter.Entry()
+	it.iter.Next()
 	return e
 }
+func (it *sstIterator) close()               { it.reader.Close() }
 
 func canDropTombstone(key string, externalSSTs []*sstable.Reader) bool {
 	for _, sst := range externalSSTs {
 		if sst.MinKey <= key && key <= sst.MaxKey {
-			 if sst.MightContain(key) {
+			if sst.MightContain(key) {
 				return false
 			}
 		}
@@ -96,8 +87,8 @@ func Compact(inputPaths []string, outputPath string, externalSSTs []*sstable.Rea
 	}
 
 	totalKeys := uint(0)
-	for _, iter := range iters {
-		totalKeys += uint(len(iter.entries))
+	for _, it := range iters {
+		totalKeys += uint(it.reader.KeyCount)
 	}
 
 	h := &minHeap{}
