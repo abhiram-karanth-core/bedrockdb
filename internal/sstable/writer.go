@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	footerSize = 24
+	footerSize = 32
 	magic      = uint64(0xDEADC0FFEEBEEF42)
 
 	indexEntryHeader = 12
@@ -19,19 +19,19 @@ const (
 	bloomFalsePositiveRate = 0.01
 )
 
-
 type indexEntry struct {
 	firstKey    string
 	blockOffset uint64
 }
 
 type Writer struct {
-	file        *os.File
-	bufWriter   *bufio.Writer
+	file         *os.File
+	bufWriter    *bufio.Writer
 	currentBlock *Block
-	index       []indexEntry
-	bloom       *bloom.BloomFilter
-	offset      uint64 
+	index        []indexEntry
+	bloom        *bloom.BloomFilter
+	offset       uint64
+	keyCount     uint64
 }
 
 func NewWriter(path string, estimatedKeys uint) (*Writer, error) {
@@ -49,7 +49,7 @@ func NewWriter(path string, estimatedKeys uint) (*Writer, error) {
 }
 
 func (w *Writer) Add(key, value string) error {
-
+	w.keyCount++
 	w.bloom.AddString(key)
 
 	err := w.currentBlock.Add(key, value)
@@ -60,13 +60,11 @@ func (w *Writer) Add(key, value string) error {
 		return fmt.Errorf("sstable writer: add to block: %w", err)
 	}
 
-
 	if err := w.flushBlock(); err != nil {
 		return err
 	}
 	return w.currentBlock.Add(key, value)
 }
-
 
 func (w *Writer) flushBlock() error {
 	if w.currentBlock.IsEmpty() {
@@ -107,7 +105,6 @@ func (w *Writer) Finish() error {
 		return err
 	}
 
-
 	if err := w.bufWriter.Flush(); err != nil {
 		return fmt.Errorf("sstable writer: flush: %w", err)
 	}
@@ -118,7 +115,6 @@ func (w *Writer) Finish() error {
 
 	return w.file.Close()
 }
-
 
 func (w *Writer) writeIndexBlock() error {
 	for _, entry := range w.index {
@@ -159,7 +155,8 @@ func (w *Writer) writeFooter(indexOffset, bloomOffset uint64) error {
 	var footer [footerSize]byte
 	binary.LittleEndian.PutUint64(footer[0:8], indexOffset)
 	binary.LittleEndian.PutUint64(footer[8:16], bloomOffset)
-	binary.LittleEndian.PutUint64(footer[16:24], magic)
+	binary.LittleEndian.PutUint64(footer[16:24], w.keyCount)
+	binary.LittleEndian.PutUint64(footer[24:32], magic)
 
 	if _, err := w.bufWriter.Write(footer[:]); err != nil {
 		return fmt.Errorf("sstable writer: write footer: %w", err)

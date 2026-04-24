@@ -13,14 +13,22 @@ import (
 const defaultCacheCapacity = 256
 
 type Reader struct {
-	file   *os.File
-	fd     uintptr
-	index  []indexEntry
-	bloom  *bloom.BloomFilter
-	cache  *lruCache
-	Path   string
-	MinKey string
-	MaxKey string
+	file     *os.File
+	fd       uintptr
+	index    []indexEntry
+	bloom    *bloom.BloomFilter
+	cache    *lruCache
+	Path     string
+	MinKey   string
+	MaxKey   string
+	KeyCount uint64
+}
+// Iterator streams entries one at a time without loading the full file.
+type Iterator struct {
+	r          *Reader
+	blockIdx   int      // current index into r.index
+	blockBuf   []Entry  // decoded entries of current block
+	posInBlock int      // position within blockBuf
 }
 
 func Open(path string) (*Reader, error) {
@@ -62,7 +70,8 @@ func (r *Reader) loadFooter() error {
 
 	indexOffset := binary.LittleEndian.Uint64(footer[0:8])
 	bloomOffset := binary.LittleEndian.Uint64(footer[8:16])
-	fileMagic := binary.LittleEndian.Uint64(footer[16:24])
+	r.KeyCount  = binary.LittleEndian.Uint64(footer[16:24])  // ← new
+	fileMagic  := binary.LittleEndian.Uint64(footer[24:32])
 
 	if fileMagic != magic {
 		return fmt.Errorf("sstable reader: invalid magic %x", fileMagic)
@@ -282,5 +291,43 @@ func (r *Reader) ClearCache() {
 }
 
 func (r *Reader) MightContain(key string) bool {
-    return r.bloom.TestString(key)
+	return r.bloom.TestString(key)
+}
+
+
+func (r *Reader) NewIterator() *Iterator {
+	it := &Iterator{r: r}
+	it.loadBlock(0) // prime first block
+	return it
+}
+
+func (it *Iterator) loadBlock(idx int) {
+	if idx >= len(it.r.index) {
+		it.blockBuf = nil
+		return
+	}
+	offset := it.r.index[idx].blockOffset
+	entries, err := it.r.readBlock(offset)
+	if err != nil {
+		it.blockBuf = nil
+		return
+	}
+	it.blockIdx = idx
+	it.blockBuf = entries
+	it.posInBlock = 0
+}
+
+func (it *Iterator) Valid() bool {
+	return len(it.blockBuf) > 0 && it.posInBlock < len(it.blockBuf)
+}
+
+func (it *Iterator) Entry() Entry {
+	return it.blockBuf[it.posInBlock]
+}
+
+func (it *Iterator) Next() {
+	it.posInBlock++
+	if it.posInBlock >= len(it.blockBuf) {
+		it.loadBlock(it.blockIdx + 1) // advance to next block
+	}
 }
