@@ -46,18 +46,18 @@ type sstIterator struct {
 }
 
 func newSSTableIterator(path string) (*sstIterator, error) {
-	r, err := sstable.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("compaction: open sstable %s: %w", path, err)
-	}
-	defer r.Close()
+    r, err := sstable.Open(path)
+    if err != nil {
+        return nil, fmt.Errorf("compaction: open sstable %s: %w", path, err)
+    }
+    defer r.Close()
 
-	entries, err := r.ScanAll()
-	if err != nil {
-		return nil, fmt.Errorf("compaction: scan %s: %w", path, err)
-	}
+    entries, err := r.Scan(r.MinKey, r.MaxKey)
+    if err != nil {
+        return nil, fmt.Errorf("compaction: scan %s: %w", path, err)
+    }
 
-	return &sstIterator{entries: entries}, nil
+    return &sstIterator{entries: entries}, nil
 }
 
 func (it *sstIterator) hasNext() bool {
