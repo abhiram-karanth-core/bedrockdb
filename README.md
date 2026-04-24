@@ -14,7 +14,7 @@ Write path:  WAL → Memtable → (flush) → SSTable
 Read path:   Memtable → Bloom filter → Sparse index → LRU block cache → Block decode
 Range path:  N-way heap merge across Memtable + SSTables → deduplicate → filter tombstones
 Crash recovery: WAL replay → Memtable rebuild → resume
-Compaction (background): SSTables → N-way heap merge → fewer SSTables (triggered when a size bucket reaches threshold)
+Compaction (background): SSTables → N-way streaming heap merge → fewer SSTables (triggered when a size bucket reaches threshold)
 ```
 
 **Write-ahead log (WAL)** — Group commit batches concurrent writes into a single fsync. Every write is durable before ack. Writers never block waiting for fsync.
@@ -31,7 +31,7 @@ with nothing to replay.
 
 **SSTable** — Immutable on-disk files with a three-layer read path: bloom filter (skip absent keys), binary-searched sparse index (find the right block), LRU block cache (avoid redundant decodes). SSTables are maintained in newest-first order, ensuring recent updates shadow older versions during lookups and compaction.
 
-**Compaction** — Size-tiered compaction groups SSTables into size buckets where max_size / min_size < 2.0 and compacts any bucket that reaches the threshold. Two tiers emerge naturally under typical workloads — small (fresh memtable flushes) and large (previous compaction outputs) — each compacting independently when their bucket fills. Duplicate keys are resolved by recency. Tombstones are dropped during compaction using key range awareness and bloom filters across non-selected SSTables (see design decisions).
+**Compaction** — Size-tiered compaction groups SSTables into size buckets where max_size / min_size < 2.0 and compacts any bucket that reaches the threshold. Two tiers emerge naturally under typical workloads — small (fresh memtable flushes) and large (previous compaction outputs) — each compacting independently when their bucket fills. Duplicate keys are resolved by recency. Tombstones are dropped during compaction using key range awareness and bloom filters across non-selected SSTables (see design decisions). Compaction uses a streaming iterator — blocks are decoded and written one at a time rather than loading entire SSTables into memory, keeping heap usage bounded regardless of SSTable size.
 
 ---
 
@@ -131,10 +131,10 @@ All benchmarks on Linux/amd64, 13th Gen Intel Core i7-13650HX.
 
 | Benchmark | Throughput | ns/op |
 |---|---|---|
-| Group commit (default) | **120 MB/s** | 439 ns/op |
-| Fsync-every-write | 0.10 MB/s | 519,012 ns/op |
+| Group commit (default) | **171 MB/s** | 309 ns/op |
+| Fsync-every-write | 0.05 MB/s | 964,717 ns/op |
 
-Group commit delivers a **1,181× throughput advantage** over fsync-per-write. The durability guarantee is identical — both strategies fsync to disk. The difference is how many writes share each fsync.
+Group commit delivers a **3,122× throughput advantage** over fsync-per-write. The durability guarantee is identical — both strategies fsync to disk. The difference is how many writes share each fsync.
 
 ### Memtable
 
@@ -191,9 +191,25 @@ Cache hit (~10,900ns) ≈ memtable (~11,250ns) for the same window — once bloc
 
 ### Compaction
 
-| Benchmark | Duration | Notes |
+#### Microbenchmarks (`go test -bench . -benchmem`)
+
+| Benchmark | ns/op | B/op | allocs/op | allocs/key |
+|---|---|---|---|---|
+| Compact4x500 (2k keys) | 1,783,560 | 901 KB | 9,602 | ~4.8 |
+| Compact4x5000 (20k keys) | 5,587,839 | 5.7 MB | 82,759 | ~4.1 |
+| CompactTombstoneHeavy (2k keys, 50% tombstones) | 1,920,463 | 1.2 MB | 17,011 | ~8.5 |
+| CompactTombstoneWithExternal (2k keys + bloom checks) | 2,009,813 | 1.25 MB | 17,059 | ~8.5 |
+
+~4 allocs/key on the normal compaction path is on par with production-grade Go LSMs (Pebble: 3–5, Badger: 6–10). 
+
+#### End-to-end compaction (streaming, real SSTables via HTTP)
+
+| Input | Output | Duration |
 |---|---|---|
-| 4 SSTables × 500 keys | 2.18ms | N-way heap merge |
+| 4 × 71 MB SSTables (284 MB total) | 284 MB SSTable | ~4.1 s |
+| 4 × 284 MB SSTables (1.1 GB total) | ~1.1 GB SSTable | ~16.5 s |
+
+Compaction is streaming — blocks are decoded and written one at a time. Peak heap usage stays bounded regardless of SSTable size. Throughput scales linearly: ~69 MB/s on the 284 MB input, ~67 MB/s on the 1.1 GB input, consistent across runs.
 
 ---
 
@@ -232,6 +248,9 @@ LRU evicts cold blocks under memory pressure while keeping hot blocks resident. 
 
 **Why N-way heap merge for compaction and range queries?**
 Both compaction and range queries require merging N sorted streams into one globally sorted output. A min-heap gives O(log N) per element across N iterators. The heap entry carries a source index — on key collision, the lower source index (newer SSTable) wins.
+
+**Why streaming compaction?**
+The previous compaction implementation loaded entire SSTables into memory before merging. The current implementation uses a streaming block iterator: each SSTable is read one block at a time, decoded, and its entries fed into the heap. The output SSTable is written block-by-block in parallel. This keeps peak heap usage proportional to the number of open SSTables × block size (a few MB at most), not to the total compaction input size. The end-to-end benchmarks confirm this — 1.1 GB of input compacts at ~67 MB/s with no OOM risk.
 
 **Why size-tiered compaction?**
 Size-tiered groups files of similar size rather than compacting by key range overlap (leveled) or recency (FIFO). This minimises write amplification — files are only rewritten when merged with peers of similar size, not on every level push. The tradeoff is higher read amplification than leveled compaction, mitigated by bloom filters and the LRU block cache. Cassandra uses the same strategy as its default for write-heavy workloads.
